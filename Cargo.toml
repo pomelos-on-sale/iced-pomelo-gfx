@@ -14,6 +14,11 @@ repository = "https://github.com/pomelos-on-sale/iced-pomelo-gfx"
 pomelo-gfx = { git = "ssh://git@github.com/pomelos-on-sale/pomelo-gfx.git" }
 
 iced_core = "0.14"
+# iced's compositor contract is implemented here, and it is stated in terms of window handles:
+# `Display` and `Window` are supertraits of `HasDisplayHandle`/`HasWindowHandle`. The version has
+# to be the one `iced_graphics` uses, because those are blanket impls -- a second copy of the
+# crate would be a different trait and nothing would line up.
+raw-window-handle = "0.6"
 # iced's canvas geometry: the two types a *renderer* defines so that a `canvas` has something to
 # record into (`Geometry`, and the `Frame` it is built from). It is not optional yet -- see the
 # crate docs.

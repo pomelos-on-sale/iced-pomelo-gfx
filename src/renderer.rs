@@ -27,7 +27,6 @@
 //!
 //! This module is behind the `renderer` feature, off by default, until it can draw the launcher.
 
-use std::borrow::Cow;
 use std::cell::RefCell;
 
 use iced_core::image;
@@ -526,89 +525,6 @@ impl mesh::Renderer for Renderer {
     fn draw_mesh_cache(&mut self, cache: mesh::Cache) {
         let _ = cache;
     }
-}
-
-/// The compositor this renderer reports, which is none.
-///
-/// `iced_program::Renderer` — the bound a `Program` states — asks for `compositor::Default`,
-/// because on a desktop the compositor is what creates a window's surface and presents into it.
-/// There is no window here: `iced_winit` owns the panel's buffer and presents the damaged
-/// regions itself, so nothing in this stack ever constructs one of these. The type exists to
-/// satisfy the bound, and the methods that would touch a surface say what they cannot do instead
-/// of pretending to do it.
-#[derive(Debug)]
-pub struct NoSurface;
-
-impl iced_graphics::compositor::Compositor for NoSurface {
-    type Renderer = Renderer;
-    type Surface = ();
-
-    async fn with_backend(
-        _settings: iced_graphics::Settings,
-        _display: impl iced_graphics::compositor::Display + Clone,
-        _compatible_window: impl iced_graphics::compositor::Window + Clone,
-        _shell: iced_graphics::Shell,
-        _backend: Option<&str>,
-    ) -> Result<Self, iced_graphics::Error> {
-        Ok(Self)
-    }
-
-    fn create_renderer(&self) -> Renderer {
-        Renderer::new(Font::default(), Pixels(16.0))
-    }
-
-    fn create_surface<W: iced_graphics::compositor::Window + Clone>(
-        &mut self,
-        _window: W,
-        _width: u32,
-        _height: u32,
-    ) {
-    }
-
-    fn configure_surface(&mut self, _surface: &mut (), _width: u32, _height: u32) {}
-
-    fn load_font(&mut self, font: Cow<'static, [u8]>) {
-        iced_graphics::text::font_system()
-            .write()
-            .expect("the font system")
-            .load_font(font);
-    }
-
-    fn information(&self) -> iced_graphics::compositor::Information {
-        iced_graphics::compositor::Information {
-            adapter: String::from("pomelo-gfx"),
-            backend: String::from("RGB565"),
-        }
-    }
-
-    fn present(
-        &mut self,
-        _renderer: &mut Renderer,
-        _surface: &mut (),
-        _viewport: &iced_graphics::Viewport,
-        _background: Color,
-        _on_pre_present: impl FnOnce(),
-    ) -> Result<(), iced_graphics::compositor::SurfaceError> {
-        panic!("`pomelo-gfx` has no window surface: `iced_winit` presents the panel")
-    }
-
-    fn screenshot(
-        &mut self,
-        renderer: &mut Renderer,
-        viewport: &iced_graphics::Viewport,
-        background: Color,
-    ) -> Vec<u8> {
-        iced_core::renderer::Headless::screenshot(
-            renderer,
-            viewport.physical_size(),
-            viewport.scale_factor(),
-            background,
-        )
-    }
-}
-
-impl iced_graphics::compositor::Default for Renderer {
-    type Compositor = NoSurface;
 }
 
 impl iced_core::renderer::Headless for Renderer {

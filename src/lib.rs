@@ -48,9 +48,12 @@
 mod renderer;
 mod text;
 
+pub mod compositor;
 pub mod geometry;
+pub mod panel;
 pub mod scene;
 pub mod surface;
 
+pub use compositor::{Compositor, Panel};
 pub use renderer::{Item, Placement, Renderer};
 pub use surface::Surface;
