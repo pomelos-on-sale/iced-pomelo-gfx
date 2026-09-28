@@ -27,6 +27,7 @@
 //!
 //! This module is behind the `renderer` feature, off by default, until it can draw the launcher.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 
 use iced_core::image;
@@ -35,7 +36,7 @@ use iced_core::text;
 use iced_core::{Background, Color, Font, Pixels, Point, Rectangle, Size, Transformation, Vector};
 use iced_graphics::geometry as iced_geometry;
 use iced_graphics::mesh;
-use pomelo_gfx::{Canvas, RRect, Radius, Rect as GfxRect};
+use pomelo_gfx::{Canvas, Pixmap565, RRect, Radius, Rect as GfxRect};
 
 use crate::geometry::{self, Parameters, Primitive, TextRun};
 
@@ -524,6 +525,138 @@ impl mesh::Renderer for Renderer {
 
     fn draw_mesh_cache(&mut self, cache: mesh::Cache) {
         let _ = cache;
+    }
+}
+
+/// The compositor this renderer reports, which is none.
+///
+/// `iced_program::Renderer` — the bound a `Program` states — asks for `compositor::Default`,
+/// because on a desktop the compositor is what creates a window's surface and presents into it.
+/// There is no window here: `pomelo-iced-host` owns the panel's buffer and presents the damaged
+/// regions itself, so nothing in this stack ever constructs one of these. The type exists to
+/// satisfy the bound, and the methods that would touch a surface say what they cannot do instead
+/// of pretending to do it.
+#[derive(Debug)]
+pub struct NoSurface;
+
+impl iced_graphics::compositor::Compositor for NoSurface {
+    type Renderer = Renderer;
+    type Surface = ();
+
+    async fn with_backend(
+        _settings: iced_graphics::Settings,
+        _display: impl iced_graphics::compositor::Display + Clone,
+        _compatible_window: impl iced_graphics::compositor::Window + Clone,
+        _shell: iced_graphics::Shell,
+        _backend: Option<&str>,
+    ) -> Result<Self, iced_graphics::Error> {
+        Ok(Self)
+    }
+
+    fn create_renderer(&self) -> Renderer {
+        Renderer::new(Font::default(), Pixels(16.0))
+    }
+
+    fn create_surface<W: iced_graphics::compositor::Window + Clone>(
+        &mut self,
+        _window: W,
+        _width: u32,
+        _height: u32,
+    ) {
+    }
+
+    fn configure_surface(&mut self, _surface: &mut (), _width: u32, _height: u32) {}
+
+    fn load_font(&mut self, font: Cow<'static, [u8]>) {
+        iced_graphics::text::font_system()
+            .write()
+            .expect("the font system")
+            .load_font(font);
+    }
+
+    fn information(&self) -> iced_graphics::compositor::Information {
+        iced_graphics::compositor::Information {
+            adapter: String::from("pomelo-gfx"),
+            backend: String::from("RGB565"),
+        }
+    }
+
+    fn present(
+        &mut self,
+        _renderer: &mut Renderer,
+        _surface: &mut (),
+        _viewport: &iced_graphics::Viewport,
+        _background: Color,
+        _on_pre_present: impl FnOnce(),
+    ) -> Result<(), iced_graphics::compositor::SurfaceError> {
+        panic!("`pomelo-gfx` has no window surface: `pomelo-iced-host` presents the panel")
+    }
+
+    fn screenshot(
+        &mut self,
+        renderer: &mut Renderer,
+        viewport: &iced_graphics::Viewport,
+        background: Color,
+    ) -> Vec<u8> {
+        iced_core::renderer::Headless::screenshot(
+            renderer,
+            viewport.physical_size(),
+            viewport.scale_factor(),
+            background,
+        )
+    }
+}
+
+impl iced_graphics::compositor::Default for Renderer {
+    type Compositor = NoSurface;
+}
+
+impl iced_core::renderer::Headless for Renderer {
+    async fn new(
+        default_font: Font,
+        default_text_size: Pixels,
+        backend: Option<&str>,
+    ) -> Option<Self> {
+        // `None` is "whatever the platform draws with". A named backend that is not this one is a
+        // request that cannot be honoured, and saying so is better than drawing with the wrong
+        // rasteriser.
+        matches!(backend, None | Some("pomelo-gfx" | "pomelo_gfx"))
+            .then(|| Renderer::new(default_font, default_text_size))
+    }
+
+    fn name(&self) -> String {
+        String::from("pomelo-gfx")
+    }
+
+    /// Draws the recording into a fresh RGB565 buffer and hands it back as RGBA8888.
+    ///
+    /// The one place this crate makes pixels of its own: it needs no surface and no window, which
+    /// is why it can be the real thing rather than a stub. iced's testing helpers are what ask.
+    fn screenshot(&mut self, size: Size<u32>, _scale_factor: f32, background: Color) -> Vec<u8> {
+        let Some(mut panel) = Pixmap565::new(size.width, size.height) else {
+            return Vec::new();
+        };
+
+        let damage = GfxRect::from_ltrb(0.0, 0.0, size.width as f32, size.height as f32);
+        let mut canvas = Canvas::new(panel.as_mut());
+
+        canvas.clear(geometry::color_of(background));
+        self.replay(&mut canvas, damage);
+
+        panel
+            .data()
+            .iter()
+            .flat_map(|pixel| {
+                let (red, green, blue) = (pixel >> 11, (pixel >> 5) & 0x3f, pixel & 0x1f);
+
+                [
+                    (red << 3 | red >> 2) as u8,
+                    (green << 2 | green >> 4) as u8,
+                    (blue << 3 | blue >> 2) as u8,
+                    0xff,
+                ]
+            })
+            .collect()
     }
 }
 
