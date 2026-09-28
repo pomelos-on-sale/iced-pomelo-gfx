@@ -532,7 +532,7 @@ impl mesh::Renderer for Renderer {
 ///
 /// `iced_program::Renderer` — the bound a `Program` states — asks for `compositor::Default`,
 /// because on a desktop the compositor is what creates a window's surface and presents into it.
-/// There is no window here: `pomelo-iced-host` owns the panel's buffer and presents the damaged
+/// There is no window here: `iced_winit` owns the panel's buffer and presents the damaged
 /// regions itself, so nothing in this stack ever constructs one of these. The type exists to
 /// satisfy the bound, and the methods that would touch a surface say what they cannot do instead
 /// of pretending to do it.
@@ -589,7 +589,7 @@ impl iced_graphics::compositor::Compositor for NoSurface {
         _background: Color,
         _on_pre_present: impl FnOnce(),
     ) -> Result<(), iced_graphics::compositor::SurfaceError> {
-        panic!("`pomelo-gfx` has no window surface: `pomelo-iced-host` presents the panel")
+        panic!("`pomelo-gfx` has no window surface: `iced_winit` presents the panel")
     }
 
     fn screenshot(

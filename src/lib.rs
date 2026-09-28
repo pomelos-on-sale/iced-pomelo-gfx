@@ -5,8 +5,8 @@
 //! geometry ones — and turns a frame of widgets into drawing commands.
 //!
 //! What it does *not* own is the pixel buffer. [`Renderer`] records the frame as a flat list of
-//! [`Item`]s and hands it over; `pomelo-iced-host` replays that list into the panel's RGB565
-//! buffer and presents the damaged regions. That split is iced's own shape rather than an
+//! [`Item`]s and hands it over; `iced_winit` (the platform layer, in `vendor/iced-pomelo-winit`)
+//! replays that list into the panel's RGB565 buffer and presents the damaged regions. That split is iced's own shape rather than an
 //! invention here: `iced_tiny_skia::Renderer::draw` takes the pixel buffer from its caller too,
 //! and only its *engine* rasterises.
 //!
