@@ -4,18 +4,16 @@
 //! iced asks a renderer for — `iced_core::renderer::Renderer`, and the text, mesh and canvas
 //! geometry ones — and turns a frame of widgets into drawing commands.
 //!
-//! What it does *not* own is the pixel buffer. [`Renderer`] records the frame as a flat list of
-//! [`Item`]s and hands it over; `iced_winit` (the platform layer, in `vendor/iced-pomelo-winit`)
-//! replays that list into the panel's RGB565 buffer and presents the damaged regions. That split is iced's own shape rather than an
-//! invention here: `iced_tiny_skia::Renderer::draw` takes the pixel buffer from its caller too,
-//! and only its *engine* rasterises.
+//! What it does *not* own is the platform: iced's `Compositor` contract is implemented here (a
+//! [`Surface`] owns the panel's RGB565 frame buffer and replays the recording into it), but where
+//! those pixels go from there — a QSPI panel, a fake in a test — is the host's business.
 //!
 //! ```text
 //! iced_widget / iced_runtime      widgets and the runtime
 //!         ↓   the renderer contract — this crate
-//! iced-pomelo-gfx                 records the frame's commands
-//!         ↓   the recorded commands
-//! pomelo-iced-host                replays them into RGB565, presents the damaged regions
+//! iced-pomelo-gfx                 records the frame's commands, replays them into RGB565
+//!         ↓   RGB565, plus the damaged rectangles
+//! pomelo-iced-host                hands them to the panel, and polls the touch
 //!         ↓   RGB565
 //! the panel
 //! ```
@@ -24,7 +22,7 @@
 //!
 //! iced's own renderer keeps a tree of layers and diffs it to find damage. Here a frame is a
 //! `Vec<Item>`, each one already carrying its clip and its placement, and the damage between two
-//! frames is a merge-join over two such lists — `pomelo-iced-host`'s `scene` module does that.
+//! frames is a merge-join over two such lists — the [`scene`] module does that.
 //! Flatness is what makes it a merge-join: there is no tree to walk and no index to pair by, so
 //! a canvas that redraws a stroke animation appends the strokes that are already finished as
 //! *equal* items and damages only the one that is still growing.
@@ -51,5 +49,8 @@ mod renderer;
 mod text;
 
 pub mod geometry;
+pub mod scene;
+pub mod surface;
 
 pub use renderer::{Item, Placement, Renderer};
+pub use surface::Surface;
