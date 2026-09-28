@@ -4,14 +4,20 @@ version = "0.1.0"
 edition = "2021"
 description = "iced's renderer contract, implemented over pomelo-gfx: records a frame's commands instead of rasterising it, so the platform can replay them into RGB565"
 license = "GPL-3.0-only"
+repository = "https://github.com/pomelos-on-sale/iced-pomelo-gfx"
 
 [dependencies]
+# This crate is its own repository, and `pomelo-gfx` is its sibling repository rather than a
+# directory: a path dependency would only resolve where the two happen to lie next to each other,
+# which is true inside `pomelo-os` and nowhere else. `pomelo-os` patches this git source back to
+# its `vendor/pomelo-gfx` submodule, so the two are the same checkout there.
+pomelo-gfx = { git = "ssh://git@github.com/pomelos-on-sale/pomelo-gfx.git" }
+
 iced_core = "0.14"
 # iced's canvas geometry: the two types a *renderer* defines so that a `canvas` has something to
-# record into (`Geometry`, and the `Frame` it is built from). `pomelo-iced-host` records through
-# the same trait, which is why this is not optional yet -- see the crate docs.
+# record into (`Geometry`, and the `Frame` it is built from). It is not optional yet -- see the
+# crate docs.
 iced_graphics = { version = "0.14", features = ["geometry"] }
-pomelo-gfx = { path = "../pomelo-gfx" }
 # iced's canvas states its paths as `lyon_path` paths -- `iced_graphics::geometry::Path` wraps one,
 # and `Path::raw()` is the only way to read the verbs back out. `iced_graphics`' own `geometry`
 # feature turns its copy on; this crate names the crate directly, so it needs its own edge.
