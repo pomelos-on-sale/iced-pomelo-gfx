@@ -102,7 +102,7 @@ impl Surface {
             damage
         };
 
-        let damage = iced_graphics::damage::group(damage, screen);
+        let damage = tighten(iced_graphics::damage::group(damage, screen));
 
         if damage.is_empty() {
             return Vec::new();
@@ -137,5 +137,105 @@ impl Surface {
             .iter()
             .map(|bounds| *bounds * self.viewport.scale_factor())
             .collect()
+    }
+}
+
+/// Folds a damage list into itself wherever doing so cannot cost more pixels.
+///
+/// iced's [`iced_graphics::damage::group`] merges in a single pass with one accumulator, sorted by
+/// distance from the origin, so a region that overlaps one it has *already emitted* is never
+/// revisited: a whole-screen frame can come back as the screen **plus rectangles inside it**.
+/// `iced_tiny_skia` gets away with that because it rasterises every primitive over its full extent
+/// per rectangle — but this path draws each rectangle on its own, so a rectangle that is already
+/// inside another one is a second pass over the same pixels. Measured on the launcher opening
+/// Settings: 7 rectangles and 344,743 px of drawing for a 230,400 px panel.
+///
+/// Two rectangles are folded when their union costs no more than the two of them together — always
+/// true when they overlap, never true when they are far apart. **The result never paints more
+/// pixels than the list it was given**, and it never has more rectangles. Disjoint damage stays
+/// separate, which is the thing this path exists for and `tiny-skia` cannot afford.
+fn tighten(mut damage: Vec<Rectangle>) -> Vec<Rectangle> {
+    let mut folded = true;
+
+    while folded {
+        folded = false;
+
+        let mut output: Vec<Rectangle> = Vec::with_capacity(damage.len());
+
+        'rectangles: for bounds in damage {
+            for existing in output.iter_mut() {
+                let union = existing.union(&bounds);
+
+                if union.area() <= existing.area() + bounds.area() {
+                    *existing = union;
+                    folded = true;
+                    continue 'rectangles;
+                }
+            }
+
+            output.push(bounds);
+        }
+
+        damage = output;
+    }
+
+    damage
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iced_core::Point;
+
+    fn rect(x: f32, y: f32, width: f32, height: f32) -> Rectangle {
+        Rectangle::new(Point::new(x, y), Size::new(width, height))
+    }
+
+    /// The measured case: the screen, plus three of the rectangles iced's grouping emits inside it
+    /// (a card, a row and a label). Painting the screen already paints them.
+    #[test]
+    fn a_rectangle_inside_another_one_is_folded_into_it() {
+        let screen = rect(0.0, 0.0, 480.0, 480.0);
+
+        assert_eq!(
+            tighten(vec![
+                rect(19.0, 59.0, 442.0, 51.0),
+                screen,
+                rect(73.0, 220.0, 49.0, 21.0),
+                rect(0.0, 0.0, 272.0, 246.0),
+            ]),
+            vec![screen]
+        );
+    }
+
+    /// Two overlapping rectangles are one pass over the frame's commands instead of two, whenever
+    /// the union is not more pixels than the pair.
+    #[test]
+    fn overlapping_rectangles_become_one() {
+        assert_eq!(
+            tighten(vec![
+                rect(0.0, 0.0, 100.0, 100.0),
+                rect(50.0, 0.0, 100.0, 100.0),
+            ]),
+            vec![rect(0.0, 0.0, 150.0, 100.0)]
+        );
+    }
+
+    /// Overlapping *corners* are left alone: the union would cover 22,500 px for two rectangles of
+    /// 10,000, which is more work, not less.
+    #[test]
+    fn rectangles_that_only_touch_a_corner_stay_separate() {
+        let damage = vec![rect(0.0, 0.0, 100.0, 100.0), rect(50.0, 50.0, 100.0, 100.0)];
+
+        assert_eq!(tighten(damage.clone()), damage);
+    }
+
+    /// Disjoint damage stays disjoint: the whole point of drawing per rectangle is that far-apart
+    /// changes do not pay for the space between them.
+    #[test]
+    fn rectangles_far_apart_stay_separate() {
+        let damage = vec![rect(0.0, 0.0, 10.0, 10.0), rect(400.0, 400.0, 10.0, 10.0)];
+
+        assert_eq!(tighten(damage.clone()), damage);
     }
 }
