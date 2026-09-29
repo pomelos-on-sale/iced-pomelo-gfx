@@ -30,10 +30,11 @@
 //!
 //! # What is not here yet
 //!
-//! Text. `Frame::fill_text` and `Frame::stroke_text` are `todo!()` rather than silently dropped,
-//! because iced's canvas text needs a `Paragraph` and a `blit_mask` replay, and neither the
-//! launcher nor hello draws canvas text. `Renderer::fill_text` — the *widget* text, which is what
-//! the launcher's labels use — is a different method and a later slice.
+//! Canvas text. `Frame::fill_text` and `Frame::stroke_text` are `todo!()` rather than silently
+//! dropped, because iced's canvas text needs a `Paragraph` and a `blit_mask` replay, and neither
+//! the launcher nor hello draws canvas text. When it lands it will be a [`Text`](crate::layer::Text)
+//! in the layer's own `text` vector, the way `iced_tiny_skia` records it — which is why there is no
+//! text case in [`Primitive`] at all: a widget's label is a text *item*, not a canvas command.
 
 use std::sync::Arc;
 
@@ -107,23 +108,6 @@ pub enum Primitive {
         paint: Paint<'static>,
         /// How wide, and with what ends and joins.
         stroke: GfxStroke,
-    },
-    /// A run of text.
-    ///
-    /// The cheap fields come first so that the comparison the damage diff makes is decided by them
-    /// before it ever reaches the text itself — which, for a paragraph someone else shaped, means
-    /// comparing two cosmic-text buffers.
-    Text {
-        /// Where its top-left goes.
-        position: Point,
-        /// What colour it is drawn in.
-        color: iced_core::Color,
-        /// The rectangle it was asked to stay inside. This is also all the damage it can cause: a
-        /// paragraph does not report how big it is, and what a widget passes here is its own
-        /// bounds, which the text is inside by construction.
-        bounds: Rectangle,
-        /// What it says, in one of the two shapes iced hands text over in.
-        run: TextRun,
     },
 }
 
@@ -207,7 +191,6 @@ impl Primitive {
             Primitive::Rounded { rrect, .. } => rect_bounds(rrect.rect),
             Primitive::RoundedStroke { rrect, .. } => rect_bounds(rrect.rect),
             Primitive::Stroke { path, stroke, .. } => points_bounds(path).expand(stroke.width),
-            Primitive::Text { bounds, .. } => *bounds,
         }
     }
 }
@@ -613,10 +596,6 @@ pub fn draw(
             paint,
             stroke,
         } => canvas.stroke_path(path, paint, stroke),
-        // Text is drawn by the renderer, which owns the shaping and glyph caches it needs. Reaching
-        // this arm would mean a caller drew a text command itself, and drawing nothing is then the
-        // honest answer; the renderer never does.
-        Primitive::Text { .. } => {}
     }
 
     canvas.restore();
