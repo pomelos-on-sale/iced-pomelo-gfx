@@ -1,10 +1,11 @@
 //! The panel's frame buffer, and the step that turns a recorded frame into panel pixels.
 //!
 //! [`Renderer`] records; this is where the recording becomes pixels. A frame passes through two
-//! buffers and nothing else: [`Scene`], which remembers the commands the last frame was made of so
-//! that this one can be diffed against them, and the RGB565 frame buffer the panel is written
-//! from. There is no 8888 intermediate and no per-frame conversion — that is the whole point of
-//! drawing through `pomelo-gfx` rather than through `tiny-skia`.
+//! buffers and nothing else: the layers the last frame was made of — kept here so that this one can
+//! be diffed against them, the way iced's own compositor keeps its layer stack — and the RGB565
+//! frame buffer the panel is written from. There is no 8888 intermediate and no per-frame
+//! conversion — that is the whole point of drawing through `pomelo-gfx` rather than through
+//! `tiny-skia`.
 //!
 //! The buffer is *ours* because it is the display's: the platform layer hands the pixels to the
 //! panel and never looks inside them. `iced_tiny_skia` draws the same line between its compositor
@@ -14,13 +15,17 @@ use iced_core::{Color, Rectangle, Size};
 use iced_graphics::Viewport;
 use pomelo_gfx::Pixmap565;
 
-use crate::scene::Scene;
+use crate::layer::Layer;
 use crate::Renderer;
 
-/// The panel's pixels, and what was drawn into them last frame.
+/// The panel's pixels, and the frame they were last drawn from.
 pub struct Surface {
     panel: Pixmap565,
-    recorded: Scene,
+    /// The layers the last frame was made of, which is what this one is compared against.
+    ///
+    /// `None` until the first frame has been drawn, which is what makes that one damage the whole
+    /// panel: iced's own compositor gets the same effect from its buffer age.
+    last: Option<Vec<Layer>>,
     /// The background the panel was last cleared to, because a change to it invalidates every
     /// pixel: it is painted under the frame's own commands, so nothing in the recording can
     /// express it.
@@ -36,7 +41,7 @@ impl Surface {
     pub fn new(width: u32, height: u32) -> Option<Self> {
         Some(Self {
             panel: Pixmap565::new(width, height)?,
-            recorded: Scene::new(),
+            last: None,
             // Deliberately not black: `present` treats a background change as "everything may
             // have moved", so this makes the first frame report full damage. iced's own
             // compositor gets the same effect by starting from `Color::TRANSPARENT`.
@@ -56,19 +61,18 @@ impl Surface {
         &self.panel
     }
 
-    /// Replays a frame's recording into the panel buffer, and returns the rectangles that changed,
+    /// Draws a frame's recording into the panel buffer, and returns the rectangles that changed,
     /// in physical pixels.
     ///
     /// Unlike the `tiny-skia` path, which has to union its damage into a single rectangle —
     /// `tiny-skia` rasterises a primitive over its full extent and rejects pixels at blend time, so
-    /// every extra rectangle is another full pass — this replays the frame's commands against each
+    /// every extra rectangle is another full pass — this draws the frame's commands against each
     /// damage rectangle as it is, because `pomelo-gfx` takes the clip into the scan. What falls
     /// outside the damage costs nothing at all.
     ///
     /// An empty result means nothing moved and the panel does not need to be touched at all.
-    pub fn present(&mut self, renderer: &Renderer, background: Color) -> Vec<Rectangle> {
+    pub fn present(&mut self, renderer: &mut Renderer, background: Color) -> Vec<Rectangle> {
         let screen = Rectangle::with_size(self.viewport.logical_size());
-        let changed = self.recorded.advance(renderer.items());
 
         // A changed background invalidates every pixel. It is also not a command the tree drew —
         // the background belongs to the window, not to the tree — so it is painted here, under the
@@ -77,15 +81,32 @@ impl Surface {
         let repaint = self.background != background;
         self.background = background;
 
-        let damage = if repaint { vec![screen] } else { changed };
+        let damage = {
+            let current = renderer.layers();
+
+            // The one call that makes this the same compositor as `iced_tiny_skia`'s: the same
+            // helper, the same layer bounds, the same `Layer::damage` — and `Layer::damage` is a
+            // refinement of iced's, so nothing is reported here that is not reported there.
+            let damage = match &self.last {
+                Some(previous) if !repaint => iced_graphics::damage::diff(
+                    previous,
+                    current,
+                    |layer| vec![layer.bounds],
+                    Layer::damage,
+                ),
+                _ => vec![screen],
+            };
+
+            self.last = Some(current.to_vec());
+
+            damage
+        };
 
         let damage = iced_graphics::damage::group(damage, screen);
 
         if damage.is_empty() {
             return Vec::new();
         }
-
-        let damage = iced_graphics::damage::group(damage, screen);
 
         let mut canvas = pomelo_gfx::Canvas::new(self.panel.as_mut());
 
@@ -107,7 +128,7 @@ impl Surface {
             canvas.clip_rect(rect);
             canvas.clear(crate::geometry::color_of(background));
 
-            renderer.replay(&mut canvas, rect);
+            renderer.draw(&mut canvas, rect);
 
             canvas.restore();
         }

@@ -397,9 +397,9 @@ mod tests {
         recording_panel();
 
         let compositor = compositor();
-        let renderer = compositor.create_renderer();
+        let mut renderer = compositor.create_renderer();
 
-        assert!(renderer.items().is_empty());
+        assert!(renderer.layers()[0].quads.is_empty());
         assert_eq!(compositor.information().backend, "pomelo-gfx");
     }
 }

@@ -34,21 +34,12 @@ use iced_core::renderer::Quad;
 use iced_core::text;
 use iced_core::{Background, Color, Font, Pixels, Point, Rectangle, Size, Transformation, Vector};
 use iced_graphics::geometry as iced_geometry;
+use iced_graphics::layer::Stack;
 use iced_graphics::mesh;
 use pomelo_gfx::{Canvas, Pixmap565, RRect, Radius, Rect as GfxRect};
 
 use crate::geometry::{self, Parameters, Primitive, TextRun};
-
-/// One recorded command, and the clip it was drawn under.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Item {
-    /// What to draw.
-    pub primitive: Primitive,
-    /// The rectangle it may draw inside: its layer's bounds, narrowed by every layer above it.
-    pub clip: Rectangle,
-    /// Where it was drawn, if it was drawn inside a transformation.
-    pub placement: Placement,
-}
+use crate::layer::{Item, Layer, Text};
 
 /// The flat part of a transformation: how far it moves, and how much it scales.
 ///
@@ -75,8 +66,19 @@ impl Placement {
         *self == Self::IDENTITY
     }
 
+    /// The placement a transformation comes down to.
+    ///
+    /// `Stack` composes transformations as the `Mat4` products they are, so this is where the
+    /// composition is undone into the two numbers the rasteriser takes.
+    pub fn of(transformation: Transformation) -> Self {
+        Self {
+            translation: transformation.translation(),
+            scale: transformation.scale_factor(),
+        }
+    }
+
     /// A rectangle in this placement's coordinates, in the destination's.
-    fn map(&self, bounds: Rectangle) -> Rectangle {
+    pub fn map(&self, bounds: Rectangle) -> Rectangle {
         Rectangle {
             x: bounds.x * self.scale + self.translation.x,
             y: bounds.y * self.scale + self.translation.y,
@@ -92,43 +94,23 @@ impl Default for Placement {
     }
 }
 
-impl Item {
-    /// The device-space area this command can have changed.
-    ///
-    /// The intersection and not the whole primitive: a command asked to paint a screen-sized
-    /// rectangle inside a tile-sized clip can only have changed the tile.
-    pub fn bounds(&self) -> Rectangle {
-        self.placement
-            .map(self.primitive.bounds())
-            .intersection(&self.clip)
-            .unwrap_or(Rectangle::with_size(Size::ZERO))
-    }
-}
-
 /// The renderer iced drives.
 ///
-/// It **records** rather than draws. Every call iced makes appends a [`Primitive`] — in device
-/// space, with its clip already worked out — to a flat list, and that list is replayed into a
-/// [`Canvas`] afterwards, one damage rectangle at a time. The split is the design: the recording
-/// is what the damage between two frames is computed from, and the replay is where the clip pays
-/// off, because the rasteriser takes it into the scan rather than rejecting pixels at blend time.
-///
-/// The list is flat on purpose. iced keeps a tree of layers, and `iced_tiny_skia` compares those
-/// layers item by item with an all-or-nothing rule (`Item::Group` never compares equal), so one
-/// canvas that redraws a stroke animation damages everything it covers, every frame. Here the
-/// commands inside a layer are ordinary items, so the ones that did not change can be recognised
-/// as unchanged and left alone.
+/// It **records** rather than draws. Every call iced makes appends a command to the current
+/// [`Layer`] — the shape `iced_tiny_skia` records into, held in iced's own
+/// [`Stack`](iced_graphics::layer::Stack) — and the recording is replayed into a [`Canvas`]
+/// afterwards, one damage rectangle at a time. The split is the design: the recording is what the
+/// damage between two frames is computed from ([`Layer::damage`]), and the replay is where the clip
+/// pays off, because the rasteriser takes it into the scan rather than rejecting pixels at blend
+/// time.
 pub struct Renderer {
     default_font: Font,
     default_size: Pixels,
-    /// What has been recorded since the last reset, in the order it was drawn.
-    items: Vec<Item>,
-    /// The clip stack: one rectangle per open layer, already in device space.
-    layers: Vec<Rectangle>,
-    /// The transformation stack. See `start_transformation`.
-    transformations: Vec<Transformation>,
-    /// The bounds the frame was reset to, which is the clip before any layer opens.
-    bounds: Rectangle,
+    /// The frame being recorded, and the clip and transformation stack around it.
+    layers: Stack<Layer>,
+    /// How many transformations are open. `Stack` does not report its own depth, and this is what
+    /// the diagnostics ask for.
+    transformations: usize,
     /// The shaped paragraphs, by what they say. iced's own cache, the one its backends share.
     paragraphs: RefCell<iced_graphics::text::cache::Cache>,
     /// The rasterised glyph masks.
@@ -141,76 +123,61 @@ impl Renderer {
         Self {
             default_font,
             default_size,
-            items: Vec::new(),
-            layers: Vec::new(),
-            transformations: Vec::new(),
-            bounds: Rectangle::with_size(Size::ZERO),
+            layers: Stack::new(),
+            transformations: 0,
             paragraphs: RefCell::new(iced_graphics::text::cache::Cache::new()),
             glyphs: RefCell::new(crate::text::Glyphs::new()),
         }
     }
 
-    /// What has been recorded since the last reset, in the order it was drawn.
-    pub fn items(&self) -> &[Item] {
-        &self.items
+    /// The layers that were recorded since the last reset, in the order they were drawn.
+    pub fn layers(&mut self) -> &[Layer] {
+        self.layers.flush();
+
+        self.layers.as_slice()
     }
 
     /// How many transformations are open.
     pub fn open_transformations(&self) -> usize {
-        self.transformations.len()
-    }
-
-    /// The translation and scale in force, folded down from every open transformation.
-    ///
-    /// Transformations compose, so two of them are not two placements: the inner one's translation
-    /// is scaled by the outer one before it is added.
-    fn placement(&self) -> Placement {
         self.transformations
-            .iter()
-            .fold(Placement::IDENTITY, |outer, inner| Placement {
-                translation: outer.translation + inner.translation() * outer.scale,
-                scale: outer.scale * inner.scale_factor(),
-            })
     }
 
-    /// Replays the recording into `canvas`, clipped to `damage`.
-    pub fn replay(&self, canvas: &mut Canvas<'_>, damage: GfxRect) {
-        for item in &self.items {
-            match &item.primitive {
-                // Text is the one command that cannot be replayed by a free function: drawing it
-                // needs the shaping and glyph caches, and they live here.
-                Primitive::Text {
-                    position,
-                    color,
-                    run,
-                    ..
-                } => self.draw_text(
-                    canvas,
-                    *position,
-                    *color,
-                    run,
-                    item.clip,
-                    damage,
-                    item.placement,
-                ),
-                primitive => geometry::draw(canvas, primitive, item.clip, damage, item.placement),
+    /// Draws the recording into `canvas`, clipped to `damage`.
+    ///
+    /// The layer's bounds are the clip for the commands that have none of their own, and a canvas's
+    /// commands are clipped to what the canvas said, placed, and then to the layer.
+    pub fn draw(&self, canvas: &mut Canvas<'_>, damage: GfxRect) {
+        for layer in self.layers.as_slice() {
+            for command in &layer.quads {
+                geometry::draw(canvas, command, layer.bounds, damage, Placement::IDENTITY);
+            }
+
+            for item in &layer.primitives {
+                let placement = Placement::of(item.transformation());
+
+                let Some(clip) = placement
+                    .map(item.clip_bounds())
+                    .intersection(&layer.bounds)
+                else {
+                    continue;
+                };
+
+                for command in item.as_slice() {
+                    geometry::draw(canvas, command, clip, damage, placement);
+                }
+            }
+
+            for item in &layer.text {
+                for text in item.as_slice() {
+                    self.draw_text(canvas, text, damage);
+                }
             }
         }
     }
 
     /// Draws one recorded run of text, clipped to `damage`.
-    #[allow(clippy::too_many_arguments)]
-    fn draw_text(
-        &self,
-        canvas: &mut Canvas<'_>,
-        position: Point,
-        color: Color,
-        run: &TextRun,
-        clip_bounds: Rectangle,
-        damage: GfxRect,
-        placement: Placement,
-    ) {
-        let Some(clip) = rect(clip_bounds.intersection(&Rectangle {
+    fn draw_text(&self, canvas: &mut Canvas<'_>, text: &Text, damage: GfxRect) {
+        let Some(clip) = rect(text.clip.intersection(&Rectangle {
             x: damage.left(),
             y: damage.top(),
             width: damage.width,
@@ -224,9 +191,9 @@ impl Renderer {
 
         canvas.save();
         canvas.clip_rect(clip);
-        geometry::place(canvas, placement);
+        geometry::place(canvas, Placement::of(text.transformation));
 
-        match run {
+        match &text.run {
             TextRun::Parameters(parameters) => {
                 let mut paragraphs = self.paragraphs.borrow_mut();
                 let (_, entry) = paragraphs.allocate(font_system.raw(), parameters.key());
@@ -235,8 +202,8 @@ impl Renderer {
                     canvas,
                     font_system.raw(),
                     &entry.buffer,
-                    position,
-                    color,
+                    text.position,
+                    text.color,
                 );
             }
             // The paragraph is shaped and owned by whoever drew it; a weak reference that no
@@ -248,8 +215,8 @@ impl Renderer {
                         canvas,
                         font_system.raw(),
                         paragraph.buffer(),
-                        position,
-                        color,
+                        text.position,
+                        text.color,
                     );
                 }
             }
@@ -258,38 +225,34 @@ impl Renderer {
         canvas.restore();
     }
 
-    /// The clip in force: the frame's bounds, narrowed by every open layer.
-    fn clip(&self) -> Rectangle {
-        self.layers.iter().fold(self.bounds, |clip, bounds| {
-            clip.intersection(bounds)
-                .unwrap_or(Rectangle::with_size(Size::ZERO))
-        })
-    }
-
-    /// Records one command under the clip in force.
-    fn record(&mut self, primitive: Primitive) {
-        let clip = self.clip();
-
-        self.record_within(primitive, clip);
-    }
-
-    /// Records one command under the clip in force, narrowed by one the caller asked for.
+    /// Records a run of text into the current layer.
     ///
-    /// A widget can hand a text command a smaller rectangle than its layer (a label that must not
-    /// spill out of its own box), and narrowing here is what keeps the recording flat: the clip
-    /// travels with the command rather than becoming another layer.
-    fn record_within(&mut self, primitive: Primitive, clip: Rectangle) {
-        let clip = self
-            .clip()
-            .intersection(&clip)
-            .unwrap_or(Rectangle::with_size(Size::ZERO));
-        let placement = self.placement();
+    /// The text's own box and its clip are placed as they are recorded, which is what
+    /// `iced_tiny_skia` does with its own text commands, and the transformation travels with the
+    /// run because that is what places the glyphs when the frame is drawn.
+    fn push_text(
+        &mut self,
+        position: Point,
+        color: Color,
+        bounds: Rectangle,
+        run: TextRun,
+        clip_bounds: Rectangle,
+    ) {
+        let (layer, transformation) = self.layers.current_mut();
+        let placement = Placement::of(transformation);
 
-        self.items.push(Item {
-            primitive,
+        let Some(clip) = placement.map(clip_bounds).intersection(&layer.bounds) else {
+            return;
+        };
+
+        layer.text.push(Item::Live(Text {
+            position,
+            color,
+            bounds: placement.map(bounds),
             clip,
-            placement,
-        });
+            run,
+            transformation,
+        }));
     }
 }
 
@@ -300,13 +263,16 @@ impl Renderer {
 
 impl iced_core::renderer::Renderer for Renderer {
     /// Opens a layer, clipped to `bounds`.
+    ///
+    /// iced's own stack does the work: the bounds are placed through the transformation in force
+    /// and become the clip every command in the layer is recorded inside.
     fn start_layer(&mut self, bounds: Rectangle) {
-        self.layers.push(self.placement().map(bounds));
+        self.layers.push_clip(bounds);
     }
 
     /// Closes the current layer.
     fn end_layer(&mut self) {
-        self.layers.pop();
+        self.layers.pop_clip();
     }
 
     /// Pushes a transformation.
@@ -317,15 +283,17 @@ impl iced_core::renderer::Renderer for Renderer {
     /// exactly that. Missing it looked like this: the scrollbar moved (its own arithmetic) while the
     /// content stayed where it was.
     ///
-    /// What is kept is the flat part — a translation and a scale, which is what `Transformation`
-    /// exposes and what iced's own backends take from it.
+    /// The stack composes the matrices; the flat part is taken back out when a command is recorded
+    /// or drawn (see [`Placement`]).
     fn start_transformation(&mut self, transformation: Transformation) {
-        self.transformations.push(transformation);
+        self.transformations += 1;
+        self.layers.push_transformation(transformation);
     }
 
     /// Pops the last transformation.
     fn end_transformation(&mut self) {
-        self.transformations.pop();
+        self.transformations -= 1;
+        self.layers.pop_transformation();
     }
 
     /// Records a quad: a rounded rectangle, a border, a shadow, optionally snapped to the grid.
@@ -333,33 +301,38 @@ impl iced_core::renderer::Renderer for Renderer {
     /// The fill and the border are two commands, because that is what they are: a fill inside the
     /// bounds and a line inside its edge. A solid fill reaches `Canvas::draw_rrect`, which is the
     /// fast axis-aligned path with corner arcs; a gradient reaches the shader-aware quad filler.
+    ///
+    /// The transformation in force is placed into the commands as they are recorded, because the
+    /// rasteriser takes a transform rather than a `Quad`: the rectangle, its radius, its border
+    /// width and the rectangle a gradient is measured against all move together.
     fn fill_quad(&mut self, quad: Quad, background: impl Into<Background>) {
-        let rrect = rrect(&quad);
+        let (layer, transformation) = self.layers.current_mut();
+        let placement = Placement::of(transformation);
+        let bounds = placement.map(quad.bounds);
+        let rrect = rrect(&quad, placement);
 
         // The shadow is not drawn: a blurred one is a per-pixel distance-field loop, and no widget
         // in this OS asks for one. `iced_tiny_skia` skips it with a warning for the same reason.
         let _ = quad.shadow;
 
-        self.record(Primitive::Rounded {
+        layer.quads.push(Primitive::Rounded {
             rrect,
-            paint: paint(background.into(), quad.bounds),
+            paint: paint(background.into(), bounds),
         });
 
         if quad.border.width > 0.0 {
-            self.record(Primitive::RoundedStroke {
+            layer.quads.push(Primitive::RoundedStroke {
                 rrect,
                 paint: geometry::solid_paint(quad.border.color),
-                width: quad.border.width,
+                width: quad.border.width * placement.scale,
             });
         }
     }
 
     /// Clears everything and starts again from `bounds`.
     fn reset(&mut self, bounds: Rectangle) {
-        self.bounds = bounds;
-        self.items.clear();
-        self.layers.clear();
-        self.transformations.clear();
+        self.layers.reset(bounds);
+        self.transformations = 0;
     }
 
     /// Reports that an image cannot be allocated.
@@ -386,33 +359,34 @@ impl iced_geometry::Renderer for Renderer {
         geometry::Frame::new(bounds)
     }
 
-    /// Records a canvas's geometry.
+    /// Records a canvas's geometry as one item.
     ///
-    /// The clip is whichever is narrower, this frame's or the geometry's own, and every command
-    /// the canvas drew becomes an item of its own. That last part is the point: a canvas that
-    /// redraws a stroke animation appends the strokes that are already finished as *equal* items,
-    /// so the damage is the stroke that is still growing rather than the whole picture.
+    /// The item is the shape `iced_tiny_skia` records too: the canvas's own clip and the
+    /// transformation in force travel with it, and [`Layer::damage`] is what finds the commands
+    /// inside. A `canvas::Cache` arrives as an `Arc` that is compared by identity, so a canvas that
+    /// caches its static part costs one pointer comparison per frame — and one that does not still
+    /// only damages the piece that changed, because a group that differs is walked command by
+    /// command.
     ///
     /// The geometry's clip is in the canvas's *own* coordinates -- a canvas states its frame as
-    /// its own size, and the widget wraps the draw in a translation -- so it is placed before the
-    /// comparison. A canvas that is not at the origin is the case that needs it: 480x436 at y=44
-    /// clips its own frame to 0..436, and intersecting that with the screen would cut the last 44
-    /// rows off the bottom of every command.
+    /// its own size, and the widget wraps the draw in a translation -- so it is placed by whoever
+    /// draws or compares it. A canvas that is not at the origin is the case that needs it: 480x436
+    /// at y=44 clips its own frame to 0..436, and intersecting that with the screen before placing
+    /// it would cut the last 44 rows off the bottom of every command.
     fn draw_geometry(&mut self, geometry: Self::Geometry) {
-        let clip = self
-            .clip()
-            .intersection(&self.placement().map(geometry.clip_bounds()))
-            .unwrap_or(Rectangle::with_size(Size::ZERO));
+        let (layer, transformation) = self.layers.current_mut();
 
-        for primitive in geometry.primitives() {
-            let placement = self.placement();
+        let item = match geometry {
+            crate::geometry::Geometry::Live {
+                primitives,
+                clip_bounds,
+            } => Item::Group(primitives, clip_bounds, transformation),
+            crate::geometry::Geometry::Cache(cache) => {
+                Item::Cached(cache.primitives, cache.clip_bounds, transformation)
+            }
+        };
 
-            self.items.push(Item {
-                primitive: primitive.clone(),
-                clip,
-                placement,
-            });
-        }
+        layer.primitives.push(item);
     }
 }
 
@@ -456,17 +430,15 @@ impl text::Renderer for Renderer {
     ) {
         let paragraph = paragraph.downgrade();
 
-        self.record_within(
-            Primitive::Text {
-                position,
-                color,
-                // How big the paragraph says it is, which is the best anyone can know: `Paragraph`
-                // exposes its buffer and this. It is also what iced's own backends report for one —
-                // using the widget's clip instead reports a label as big as the screen it sits on,
-                // which is exactly what the first draft of this did.
-                bounds: Rectangle::new(position, paragraph.min_bounds),
-                run: TextRun::Shaped(paragraph),
-            },
+        // How big the paragraph says it is, which is the best anyone can know: `Paragraph`
+        // exposes its buffer and this. It is also what iced's own backends report for one —
+        // using the widget's clip instead reports a label as big as the screen it sits on,
+        // which is exactly what the first draft of this did.
+        self.push_text(
+            position,
+            color,
+            Rectangle::new(position, paragraph.min_bounds),
+            TextRun::Shaped(paragraph),
             clip_bounds,
         );
     }
@@ -492,24 +464,22 @@ impl text::Renderer for Renderer {
         color: Color,
         clip_bounds: Rectangle,
     ) {
-        self.record_within(
-            Primitive::Text {
-                position,
-                color,
-                // The text's own box, which is what iced's backends report for one run of text: the
-                // clip a widget passes is usually its whole area, and using that would report a
-                // label as big as the screen it sits on.
-                bounds: Rectangle::new(position, text.bounds),
-                run: TextRun::Parameters(Parameters {
-                    content: text.content,
-                    size: text.size.0,
-                    line_height: text.line_height.to_absolute(text.size).0,
-                    font: text.font,
-                    align_x: text.align_x,
-                    shaping: text.shaping,
-                    bounds: text.bounds,
-                }),
-            },
+        // The text's own box, which is what iced's backends report for one run of text: the clip a
+        // widget passes is usually its whole area, and using that would report a label as big as
+        // the screen it sits on.
+        self.push_text(
+            position,
+            color,
+            Rectangle::new(position, text.bounds),
+            TextRun::Parameters(Parameters {
+                content: text.content,
+                size: text.size.0,
+                line_height: text.line_height.to_absolute(text.size).0,
+                font: text.font,
+                align_x: text.align_x,
+                shaping: text.shaping,
+                bounds: text.bounds,
+            }),
             clip_bounds,
         );
     }
@@ -557,7 +527,7 @@ impl iced_core::renderer::Headless for Renderer {
         let mut canvas = Canvas::new(panel.as_mut());
 
         canvas.clear(geometry::color_of(background));
-        self.replay(&mut canvas, damage);
+        self.draw(&mut canvas, damage);
 
         panel
             .data()
@@ -590,9 +560,9 @@ fn rect(bounds: Option<Rectangle>) -> Option<GfxRect> {
     })
 }
 
-/// A quad's rectangle and corner radius, as the rasteriser states them.
-fn rrect(quad: &Quad) -> RRect {
-    let bounds = quad.bounds;
+/// A quad's rectangle and corner radius, as the rasteriser states them, placed.
+fn rrect(quad: &Quad, placement: Placement) -> RRect {
+    let bounds = placement.map(quad.bounds);
     let radius = quad.border.radius;
 
     // The rasteriser has one radius per rectangle, and iced has one per corner. Equal corners —
@@ -603,7 +573,8 @@ fn rrect(quad: &Quad) -> RRect {
         .top_left
         .max(radius.top_right)
         .max(radius.bottom_right)
-        .max(radius.bottom_left);
+        .max(radius.bottom_left)
+        * placement.scale;
 
     RRect::from_rect_radius(
         GfxRect::from_ltrb(
@@ -616,10 +587,11 @@ fn rrect(quad: &Quad) -> RRect {
     )
 }
 
-/// A background as a paint, in the quad's own rectangle.
+/// A background as a paint, in the rectangle it was measured against.
 ///
 /// The rectangle is not decoration: iced states a widget's gradient as an *angle*, and an angle
-/// only becomes two endpoints once there is a shape to measure it against.
+/// only becomes two endpoints once there is a shape to measure it against. It is the *placed*
+/// rectangle, because the command it paints is placed too.
 fn paint(background: Background, bounds: Rectangle) -> pomelo_gfx::Paint<'static> {
     match background {
         Background::Color(color) => geometry::solid_paint(color),
@@ -635,6 +607,7 @@ mod tests {
     use iced_core::renderer::Renderer as _;
     use iced_core::{Border, Color as IcedColor, Size as IcedSize};
     use iced_graphics::geometry::frame::Backend as _;
+    use iced_graphics::layer::Layer as _;
     use pomelo_gfx::{rgb565_to_rgb888, Pixmap565};
 
     const SIZE: u32 = 64;
@@ -665,10 +638,19 @@ mod tests {
         let damage = GfxRect::from_ltrb(0.0, 0.0, SIZE as f32, SIZE as f32);
 
         let mut canvas = Canvas::new(pixmap.as_mut());
-        renderer.replay(&mut canvas, damage);
+        renderer.draw(&mut canvas, damage);
         drop(canvas);
 
         pixmap
+    }
+
+    /// The frame's widget commands, in the order they were recorded.
+    fn quads(renderer: &mut Renderer) -> Vec<Primitive> {
+        renderer
+            .layers()
+            .iter()
+            .flat_map(|layer| layer.quads.iter().cloned())
+            .collect()
     }
 
     /// The colour of one pixel.
@@ -689,7 +671,7 @@ mod tests {
 
         renderer.fill_quad(white_quad(), Background::Color(IcedColor::WHITE));
 
-        assert_eq!(renderer.items().len(), 1, "one quad is one command");
+        assert_eq!(quads(&mut renderer).len(), 1, "one quad is one command");
 
         let pixmap = render(&renderer);
 
@@ -744,7 +726,7 @@ mod tests {
         renderer.fill_quad(quad, Background::Color(IcedColor::WHITE));
 
         assert_eq!(
-            renderer.items().len(),
+            quads(&mut renderer).len(),
             2,
             "a fill and a border are two commands"
         );
@@ -788,7 +770,7 @@ mod tests {
     }
 
     #[test]
-    fn a_canvas_geometry_becomes_one_item_per_command() {
+    fn a_canvas_geometry_is_one_item_that_holds_its_commands() {
         let mut renderer = renderer();
 
         let mut frame = geometry::Frame::new(Rectangle::with_size(IcedSize::new(
@@ -811,10 +793,13 @@ mod tests {
 
         iced_geometry::Renderer::draw_geometry(&mut renderer, frame.into_geometry());
 
+        let recorded = renderer.layers()[0].primitives.clone();
+
+        assert_eq!(recorded.len(), 1, "a canvas is one item");
         assert_eq!(
-            renderer.items().len(),
+            recorded[0].as_slice().len(),
             2,
-            "each command the canvas drew is an item of its own"
+            "and the commands the canvas drew are inside it"
         );
 
         let pixmap = render(&renderer);
@@ -823,6 +808,9 @@ mod tests {
         assert_eq!(at(&pixmap, 8, 40), (255, 255, 255));
         assert_eq!(at(&pixmap, 8, 24), (0, 0, 0), "and nothing between them");
     }
+
+    // The damage itself — how a frame's commands are paired, and what that costs a canvas — is
+    // tested where it lives: `layer::tests`.
 
     #[test]
     fn a_layer_narrows_every_clip_inside_it() {
@@ -841,9 +829,9 @@ mod tests {
         iced_core::renderer::Renderer::end_layer(&mut renderer);
 
         assert_eq!(
-            renderer.items()[0].clip,
+            renderer.layers()[1].bounds,
             layer,
-            "the layer is the clip the command was recorded under"
+            "the layer is the clip the commands were recorded under"
         );
 
         let pixmap = render(&renderer);
@@ -861,13 +849,21 @@ mod tests {
         let mut renderer = renderer();
         let quad = white_quad();
 
-        let bounds = quad.bounds;
         renderer.fill_quad(quad, Background::Color(IcedColor::WHITE));
 
+        let frame = Layer::with_bounds(Rectangle::with_size(IcedSize::new(
+            SIZE as f32,
+            SIZE as f32,
+        )));
+        let recorded = renderer.layers()[0].clone();
+
         assert_eq!(
-            renderer.items()[0].bounds(),
-            bounds,
-            "a command's damage is the part of it inside its clip"
+            Layer::damage(&frame, &recorded),
+            vec![Rectangle::new(
+                Point::new(7.0, 7.0),
+                IcedSize::new(18.0, 18.0)
+            )],
+            "a command's damage is its own bounds, grown by the edge it bleeds into"
         );
     }
 
@@ -893,9 +889,14 @@ mod tests {
             },
         );
 
+        let screen = Layer::with_bounds(Rectangle::with_size(IcedSize::new(
+            SIZE as f32,
+            SIZE as f32,
+        )));
+
         assert_eq!(
-            renderer.items()[0].bounds(),
-            Rectangle::new(Point::new(0.0, offset), size),
+            Layer::damage(&screen, &renderer.layers()[0]),
+            vec![Rectangle::new(Point::new(0.0, offset), size)],
             "the whole frame is on the panel, so the whole frame is damageable"
         );
     }
@@ -915,14 +916,22 @@ mod tests {
             Rectangle::with_size(IcedSize::new(SIZE as f32, SIZE as f32)),
         );
 
-        assert_eq!(renderer.items().len(), 0, "the recording is empty again");
+        assert_eq!(
+            renderer.layers().len(),
+            1,
+            "the layer that was open is gone"
+        );
+        assert!(
+            renderer.layers()[0].quads.is_empty(),
+            "the recording is empty again"
+        );
 
         renderer.fill_quad(white_quad(), Background::Color(IcedColor::WHITE));
 
         assert_eq!(
-            renderer.items()[0].clip,
+            renderer.layers()[0].bounds,
             Rectangle::with_size(IcedSize::new(SIZE as f32, SIZE as f32)),
-            "and the layer that was open is gone too"
+            "and the base layer is the frame's bounds"
         );
     }
 

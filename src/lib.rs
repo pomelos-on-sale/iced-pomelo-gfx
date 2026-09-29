@@ -18,14 +18,14 @@
 //! the panel
 //! ```
 //!
-//! # The recording is one flat list, on purpose
+//! # The recording is iced's, and the damage inside it is finer
 //!
-//! iced's own renderer keeps a tree of layers and diffs it to find damage. Here a frame is a
-//! `Vec<Item>`, each one already carrying its clip and its placement, and the damage between two
-//! frames is a merge-join over two such lists — the [`scene`] module does that.
-//! Flatness is what makes it a merge-join: there is no tree to walk and no index to pair by, so
-//! a canvas that redraws a stroke animation appends the strokes that are already finished as
-//! *equal* items and damages only the one that is still growing.
+//! A frame is a stack of [`Layer`]s — iced's shape, held in iced's own
+//! [`Stack`](iced_graphics::layer::Stack): quads, canvas geometry and text, each diffed where
+//! `iced_tiny_skia` diffs it, with the `Live`/`Group`/`Cached` cases a `canvas::Cache` needs.
+//! What differs is one function: [`Layer::damage`] pairs a layer's commands by geometry instead
+//! of by index, and walks a canvas's own recording command by command. Both are refinements of
+//! iced's answer — never coarser — and the [`layer`] module says where and why.
 //!
 //! # Why `pomelo-gfx` is not a drop-in for `tiny-skia`
 //!
@@ -50,10 +50,11 @@ mod text;
 
 pub mod compositor;
 pub mod geometry;
+pub mod layer;
 pub mod panel;
-pub mod scene;
 pub mod surface;
 
 pub use compositor::{Compositor, Panel};
-pub use renderer::{Item, Placement, Renderer};
+pub use layer::{Item, Layer, Text};
+pub use renderer::{Placement, Renderer};
 pub use surface::Surface;
