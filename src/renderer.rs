@@ -126,7 +126,7 @@ impl Renderer {
             layers: Stack::new(),
             transformations: 0,
             paragraphs: RefCell::new(iced_graphics::text::cache::Cache::new()),
-            glyphs: RefCell::new(crate::text::Glyphs::new()),
+            glyphs: RefCell::new(crate::text::Glyphs::new(crate::baked::get())),
         }
     }
 
@@ -148,9 +148,13 @@ impl Renderer {
     /// commands are clipped to what the canvas said, placed, and then to the layer.
     pub fn draw(&self, canvas: &mut Canvas<'_>, damage: GfxRect) {
         for layer in self.layers.as_slice() {
+            let quads = crate::profile::start(crate::profile::Phase::Quads);
+
             for command in &layer.quads {
                 geometry::draw(canvas, command, layer.bounds, damage, Placement::IDENTITY);
             }
+
+            drop(quads);
 
             for item in &layer.primitives {
                 let placement = Placement::of(item.transformation());
@@ -166,6 +170,8 @@ impl Renderer {
                     geometry::draw(canvas, command, clip, damage, placement);
                 }
             }
+
+            let _text = crate::profile::start(crate::profile::Phase::Text);
 
             for item in &layer.text {
                 for text in item.as_slice() {

@@ -6,6 +6,13 @@ description = "iced's renderer contract, implemented over pomelo-gfx: records a 
 license = "GPL-3.0-only"
 repository = "https://github.com/pomelos-on-sale/iced-pomelo-gfx"
 
+[features]
+# One timing line per painted frame, split by phase (see the `profile` module). Off by default: a
+# build that is not measuring must not read the clock twice per glyph for numbers nobody reads.
+profile = []
+
+default = []
+
 [dependencies]
 # This crate is its own repository, and `pomelo-gfx` is its sibling repository rather than a
 # directory: a path dependency would only resolve where the two happen to lie next to each other,

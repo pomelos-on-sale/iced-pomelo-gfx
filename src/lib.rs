@@ -48,10 +48,12 @@
 mod renderer;
 mod text;
 
+pub mod baked;
 pub mod compositor;
 pub mod geometry;
 pub mod layer;
 pub mod panel;
+pub mod profile;
 pub mod surface;
 
 pub use compositor::{Compositor, Panel};

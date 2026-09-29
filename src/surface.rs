@@ -82,6 +82,7 @@ impl Surface {
         self.background = background;
 
         let damage = {
+            let _damage = crate::profile::start(crate::profile::Phase::Damage);
             let current = renderer.layers();
 
             // The one call that makes this the same compositor as `iced_tiny_skia`'s: the same
@@ -99,44 +100,55 @@ impl Surface {
 
             self.last = Some(current.to_vec());
 
-            damage
+            tighten(iced_graphics::damage::group(damage, screen))
         };
 
-        let damage = tighten(iced_graphics::damage::group(damage, screen));
+        // The frame is drawn first and reported after: the counters are the frame's, and this is
+        // the only place that knows the frame has ended. A frame that draws nothing is reported too
+        // — the phases it took are still a frame's — and a panel write is not in here at all,
+        // because that belongs to the host and the host's own log has it.
+        let damaged = if damage.is_empty() {
+            Vec::new()
+        } else {
+            let mut canvas = pomelo_gfx::Canvas::new(self.panel.as_mut());
 
-        if damage.is_empty() {
-            return Vec::new();
-        }
+            for bounds in &damage {
+                let bounds = *bounds * self.viewport.scale_factor();
+                let rect = pomelo_gfx::Rect::from_ltrb(
+                    bounds.x,
+                    bounds.y,
+                    bounds.x + bounds.width,
+                    bounds.y + bounds.height,
+                );
 
-        let mut canvas = pomelo_gfx::Canvas::new(self.panel.as_mut());
+                // The background belongs to the window and not to the tree, so clearing the damage
+                // back to it is this path's own job — and it is not an optimisation. A widget that
+                // moved damages where it *was* as well as where it went, and nothing in the
+                // recording draws there any more: without this, the square that left would still be
+                // on the panel. `iced_tiny_skia`'s `draw(…, background)` does the same thing in one
+                // call.
+                let clear = crate::profile::start(crate::profile::Phase::Clear);
 
-        for bounds in &damage {
-            let bounds = *bounds * self.viewport.scale_factor();
-            let rect = pomelo_gfx::Rect::from_ltrb(
-                bounds.x,
-                bounds.y,
-                bounds.x + bounds.width,
-                bounds.y + bounds.height,
-            );
+                canvas.save();
+                canvas.clip_rect(rect);
+                canvas.clear(crate::geometry::color_of(background));
 
-            // The background belongs to the window and not to the tree, so clearing the damage
-            // back to it is this path's own job — and it is not an optimisation. A widget that
-            // moved damages where it *was* as well as where it went, and nothing in the recording
-            // draws there any more: without this, the square that left would still be on the
-            // panel. `iced_tiny_skia`'s `draw(…, background)` does the same thing in one call.
-            canvas.save();
-            canvas.clip_rect(rect);
-            canvas.clear(crate::geometry::color_of(background));
+                drop(clear);
 
-            renderer.draw(&mut canvas, rect);
+                renderer.draw(&mut canvas, rect);
 
-            canvas.restore();
-        }
+                canvas.restore();
+            }
 
-        damage
-            .iter()
-            .map(|bounds| *bounds * self.viewport.scale_factor())
-            .collect()
+            damage
+                .iter()
+                .map(|bounds| *bounds * self.viewport.scale_factor())
+                .collect()
+        };
+
+        crate::profile::report();
+
+        damaged
     }
 }
 

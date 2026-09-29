@@ -23,22 +23,24 @@ use iced_core::{Color, Point};
 use iced_graphics::text::cosmic_text;
 use pomelo_gfx::Canvas;
 
+use crate::baked::Baked;
 use crate::geometry;
 
 /// The rasterised glyphs, by the key of the glyph they came from.
 #[derive(Debug)]
 pub struct Glyphs {
+    /// The glyphs that had to be rasterised on the device — the fallback, and only ever the ones a
+    /// baked table did not have. A screen whose sizes are all baked leaves this empty.
     masks: HashMap<cosmic_text::CacheKey, Mask>,
     swash: cosmic_text::SwashCache,
+    /// The pre-baked tables the host installed, if it did. Consulted first, and the reason a screen
+    /// full of text costs what it costs.
+    baked: Option<&'static Baked>,
 }
 
 impl Default for Glyphs {
     fn default() -> Self {
-        Self {
-            masks: HashMap::new(),
-            // `SwashCache` is not `Default`: it allocates the rasteriser's own scratch.
-            swash: cosmic_text::SwashCache::new(),
-        }
+        Self::new(None)
     }
 }
 
@@ -52,10 +54,27 @@ struct Mask {
     top: i32,
 }
 
+/// One glyph about to be blitted: where its coverage came from is the caller's business.
+#[derive(Debug)]
+struct Placed<'a> {
+    coverage: &'a [u8],
+    width: u32,
+    height: u32,
+    left: i32,
+    top: i32,
+    /// Whether this call had to rasterise it, because it was the first time it had been asked for.
+    rasterised: bool,
+}
+
 impl Glyphs {
-    /// A cache with nothing in it.
-    pub fn new() -> Self {
-        Self::default()
+    /// A cache with nothing in it, and whatever the host baked.
+    pub fn new(baked: Option<&'static Baked>) -> Self {
+        Self {
+            masks: HashMap::new(),
+            // `SwashCache` is not `Default`: it allocates the rasteriser's own scratch.
+            swash: cosmic_text::SwashCache::new(),
+            baked,
+        }
     }
 
     /// Draws a shaped buffer with its top-left at `position`, in `color`.
@@ -86,25 +105,51 @@ impl Glyphs {
                     continue;
                 };
 
+                let _blit = crate::profile::start(crate::profile::Phase::Blits);
+
                 canvas.blit_mask(
                     physical.x + mask.left,
                     physical.y - mask.top + run.line_y.round() as i32,
                     mask.width,
                     mask.height,
-                    &mask.coverage,
+                    mask.coverage,
                     geometry::color_of(color),
                 );
+
+                // One glyph, counted once: the blit is what happened, and whether the mask had to
+                // be rasterised for it is the part of the text cost that a screen pays only once.
+                crate::profile::glyph(mask.rasterised);
             }
         }
     }
 
-    /// The mask for one glyph, rasterising it if this is the first time it has been asked for.
+    /// The mask for one glyph, wherever it comes from.
+    ///
+    /// Three sources, in this order, and the order is the whole optimisation:
+    ///
+    /// 1. **The baked tables**, which is a binary search in flash. A glyph found here costs about a
+    ///    microsecond instead of the 1.6 ms of rasterising it.
+    /// 2. **The mask cache**, which holds only what had to be rasterised, so it stays small — the
+    ///    baked sizes never put anything in it at all.
+    /// 3. **Swash**, which rasterises it and is the reason nothing is ever missing: a size with no
+    ///    table and a glyph no table has both land here, and both are correct.
     fn mask(
         &mut self,
         font_system: &mut cosmic_text::FontSystem,
         key: cosmic_text::CacheKey,
-    ) -> Option<&Mask> {
-        if !self.masks.contains_key(&key) {
+    ) -> Option<Placed<'_>> {
+        if let Some(glyph) = self.baked.and_then(|baked| baked.glyph(&key)) {
+            return Some(Placed {
+                coverage: glyph.coverage,
+                width: glyph.width,
+                height: glyph.height,
+                left: glyph.left,
+                top: glyph.top,
+                rasterised: false,
+            });
+        }
+
+        let rasterised = if !self.masks.contains_key(&key) {
             // A cap, and a crude one: when it is reached the whole cache goes, which costs one
             // frame of re-rasterising and keeps the growth bounded. The UI has one size per widget,
             // so the working set is a few hundred glyphs and this is not reached in practice —
@@ -116,30 +161,55 @@ impl Glyphs {
                 self.masks.clear();
             }
 
+            // The one phase a screen pays only once: the mask for this glyph does not exist yet,
+            // so it is rasterised here, and every later frame that draws the same glyph blits it.
+            let raster = crate::profile::start(crate::profile::Phase::Rasterise);
+
             let image = self.swash.get_image_uncached(font_system, key)?;
+
+            drop(raster);
 
             // Only a coverage mask can be blitted by `blit_mask`. A coloured glyph (an emoji) and
             // a subpixel one are both richer than that and would need an RGBA blit the rasteriser
-            // does not have; neither can come from the 16 KiB Latin subset this OS embeds.
-            if !matches!(image.content, cosmic_text::SwashContent::Mask)
+            // does not have; neither can come from the subset this OS embeds. A glyph with no
+            // placement draws nothing at all, which is a space.
+            //
+            // All three are cached as a mask with no coverage rather than passed over, and the
+            // difference is not cosmetic: a Settings screen has twenty-two of them, and a glyph
+            // that is not cached is rasterised again by *every* frame that draws it.
+            let nothing = !matches!(image.content, cosmic_text::SwashContent::Mask)
                 || image.placement.width == 0
-                || image.placement.height == 0
-            {
-                return None;
-            }
+                || image.placement.height == 0;
 
             self.masks.insert(
                 key,
                 Mask {
-                    coverage: image.data.clone(),
-                    width: image.placement.width,
-                    height: image.placement.height,
+                    coverage: if nothing {
+                        Vec::new()
+                    } else {
+                        image.data.clone()
+                    },
+                    width: if nothing { 0 } else { image.placement.width },
+                    height: if nothing { 0 } else { image.placement.height },
                     left: image.placement.left,
                     top: image.placement.top,
                 },
             );
-        }
 
-        self.masks.get(&key)
+            true
+        } else {
+            false
+        };
+
+        let mask = self.masks.get(&key)?;
+
+        Some(Placed {
+            coverage: &mask.coverage,
+            width: mask.width,
+            height: mask.height,
+            left: mask.left,
+            top: mask.top,
+            rasterised,
+        })
     }
 }
