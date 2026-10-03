@@ -164,13 +164,14 @@ impl Glyphs {
 
     /// The mask for one glyph, wherever it comes from.
     ///
-    /// Four stages in priority order:
+    /// Five stages in priority order:
     ///
     /// 1. **The baked tables**, which is a binary search in flash. A glyph found here costs about a
     ///    microsecond instead of the 1.6 ms of rasterising it.
     /// 2. **Active RAM generation**, the hottest working set of dynamic glyphs.
     /// 3. **Recent RAM generation**, promoted to active on hit to keep in-use glyphs alive across rotations.
-    /// 4. **Swash**, on-demand rasterisation for unbaked glyphs, inserted into the active generation.
+    /// 4. **Missing glyph (.notdef)**, synthesised as an outline box ("tofu") for visual debugging.
+    /// 5. **Swash**, on-demand rasterisation for unbaked glyphs, inserted into the active generation.
     fn mask(
         &mut self,
         font_system: &mut cosmic_text::FontSystem,
@@ -214,10 +215,39 @@ impl Glyphs {
             });
         }
 
-        // 4. Swash fallback: rasterise on the device
+        // 4. Missing glyph (.notdef, glyph_id == 0): synthesize a tofu (box) mask for visual debugging
+        if key.glyph_id == 0 {
+            if self.active_masks.len() >= GENERATION_LIMIT {
+                self.recent_masks = std::mem::take(&mut self.active_masks);
+            }
+            let tofu = synthesize_tofu_mask(key.font_size_bits);
+            self.active_masks.insert(key, tofu);
+            let mask = self.active_masks.get(&key)?;
+            return Some(Placed {
+                glyph: mask.as_glyph(),
+                rasterised: true,
+            });
+        }
+
+        // 5. Swash fallback: rasterise on the device
         let raster = crate::profile::start(crate::profile::Phase::Rasterise);
 
-        let image = self.swash.get_image_uncached(font_system, key)?;
+        let image = match self.swash.get_image_uncached(font_system, key) {
+            Some(img) => img,
+            None => {
+                drop(raster);
+                if self.active_masks.len() >= GENERATION_LIMIT {
+                    self.recent_masks = std::mem::take(&mut self.active_masks);
+                }
+                let tofu = synthesize_tofu_mask(key.font_size_bits);
+                self.active_masks.insert(key, tofu);
+                let mask = self.active_masks.get(&key)?;
+                return Some(Placed {
+                    glyph: mask.as_glyph(),
+                    rasterised: true,
+                });
+            }
+        };
 
         drop(raster);
 
@@ -258,6 +288,38 @@ impl Glyphs {
             glyph: mask.as_glyph(),
             rasterised: true,
         })
+    }
+}
+
+/// Synthesizes a rectangular outline mask ("tofu" / replacement box) for missing glyphs (`.notdef`).
+fn synthesize_tofu_mask(font_size_bits: u32) -> CachedMask {
+    let size = f32::from_bits(font_size_bits);
+    let size = if size.is_finite() && size > 0.0 {
+        size
+    } else {
+        14.0
+    };
+
+    let width = (size * 0.55).round().max(4.0) as u32;
+    let height = (size * 0.75).round().max(5.0) as u32;
+    let top = (size * 0.75).round() as i32;
+    let left = 1i32;
+
+    let mut coverage = vec![0u8; (width * height) as usize];
+    for y in 0..height {
+        for x in 0..width {
+            if y == 0 || y == height - 1 || x == 0 || x == width - 1 {
+                coverage[(y * width + x) as usize] = 255;
+            }
+        }
+    }
+
+    CachedMask {
+        coverage,
+        width,
+        height,
+        left,
+        top,
     }
 }
 
@@ -398,4 +460,70 @@ mod tests {
         assert_eq!(glyphs.active_masks.len(), 2);
         assert_eq!(glyphs.recent_masks.len(), GENERATION_LIMIT - 1);
     }
+
+    #[test]
+    fn synthesize_tofu_mask_creates_valid_outline_box() {
+        let mask = synthesize_tofu_mask(18.0f32.to_bits());
+        assert_eq!(mask.width, 10);
+        assert_eq!(mask.height, 14);
+        assert_eq!(mask.top, 14);
+        assert_eq!(mask.left, 1);
+        assert_eq!(mask.coverage.len(), (10 * 14) as usize);
+
+        // Check top and bottom border are fully covered
+        for x in 0..10 {
+            assert_eq!(mask.coverage[x], 255, "top border at x={x}");
+            assert_eq!(mask.coverage[13 * 10 + x], 255, "bottom border at x={x}");
+        }
+
+        // Check left and right border are fully covered
+        for y in 0..14 {
+            assert_eq!(mask.coverage[y * 10], 255, "left border at y={y}");
+            assert_eq!(mask.coverage[y * 10 + 9], 255, "right border at y={y}");
+        }
+
+        // Check interior is hollow (0 coverage)
+        for y in 1..13 {
+            for x in 1..9 {
+                assert_eq!(mask.coverage[y * 10 + x], 0, "interior at ({x}, {y}) must be empty");
+            }
+        }
+    }
+
+    #[test]
+    fn missing_glyph_zero_returns_tofu_mask_and_caches() {
+        let mut glyphs = Glyphs::new(None);
+        let font_system = iced_graphics::text::font_system();
+        let mut font_system = font_system.write().expect("font system");
+
+        let mut buffer = cosmic_text::Buffer::new(font_system.raw(), cosmic_text::Metrics::new(18.0, 22.0));
+        buffer.set_text(
+            font_system.raw(),
+            "X",
+            &cosmic_text::Attrs::new(),
+            cosmic_text::Shaping::Advanced,
+            None,
+        );
+        buffer.shape_until_scroll(font_system.raw(), false);
+        let base_glyph = &buffer.layout_runs().next().unwrap().glyphs[0];
+        let mut key = base_glyph.physical((0.0, 0.0), 1.0).cache_key;
+        key.glyph_id = 0; // .notdef
+
+        // 1st request -> synthesised tofu mask, rasterised=true
+        {
+            let m1 = glyphs.mask(font_system.raw(), key).expect("tofu mask must be returned");
+            assert!(m1.rasterised);
+            assert_eq!(m1.width, 10);
+            assert_eq!(m1.height, 14);
+        }
+
+        // 2nd request -> RAM cache hit, rasterised=false
+        {
+            let m2 = glyphs.mask(font_system.raw(), key).expect("cached tofu mask");
+            assert!(!m2.rasterised);
+            assert_eq!(m2.width, 10);
+            assert_eq!(m2.height, 14);
+        }
+    }
 }
+
