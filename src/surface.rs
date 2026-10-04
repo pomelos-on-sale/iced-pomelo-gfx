@@ -100,7 +100,13 @@ impl Surface {
 
             self.last = Some(current.to_vec());
 
-            tighten(iced_graphics::damage::group(damage, screen))
+            let grouped = iced_graphics::damage::group(damage, screen);
+            let aligned: Vec<Rectangle> = grouped
+                .into_iter()
+                .filter_map(|r| align_hardware_damage(r, screen))
+                .collect();
+
+            tighten(aligned)
         };
 
         // The frame is drawn first and reported after: the counters are the frame's, and this is
@@ -149,6 +155,31 @@ impl Surface {
         crate::profile::report();
 
         damaged
+    }
+}
+
+/// Snaps a damage rectangle to 2-pixel aligned integer boundaries.
+///
+/// The CO5300 AMOLED QSPI controller hardware constraint requires coordinates to be 2-pixel (even)
+/// aligned. Snapping `(x1, y1)` down to the nearest even integer and `(x2, y2)` up to the nearest
+/// even integer guarantees that `canvas.clear`, `renderer.draw` and the display DMA write path
+/// (`hal_display_draw_bitmap`) operate on the exact same pixels, preventing un-cleared border pixels
+/// or DMA 1-pixel shifts from displaying noisy vertical lines on region edges.
+fn align_hardware_damage(rect: Rectangle, screen: Rectangle) -> Option<Rectangle> {
+    let x1 = ((rect.x.floor() as i32).max(0) / 2 * 2) as f32;
+    let y1 = ((rect.y.floor() as i32).max(0) / 2 * 2) as f32;
+    let x2 = (((rect.x + rect.width).ceil() as i32 + 1) / 2 * 2).min(screen.width as i32) as f32;
+    let y2 = (((rect.y + rect.height).ceil() as i32 + 1) / 2 * 2).min(screen.height as i32) as f32;
+
+    if x2 > x1 && y2 > y1 {
+        Some(Rectangle {
+            x: x1,
+            y: y1,
+            width: x2 - x1,
+            height: y2 - y1,
+        })
+    } else {
+        None
     }
 }
 
@@ -249,5 +280,25 @@ mod tests {
         let damage = vec![rect(0.0, 0.0, 10.0, 10.0), rect(400.0, 400.0, 10.0, 10.0)];
 
         assert_eq!(tighten(damage.clone()), damage);
+    }
+
+    /// Odd and subpixel boundaries are snapped outward to even integer coordinates for hardware QSPI alignment.
+    #[test]
+    fn damage_is_aligned_to_even_hardware_grid() {
+        let screen = rect(0.0, 0.0, 480.0, 480.0);
+
+        // Odd x (73.0), fractional width (49.3): x1=72, x2=ceil(122.3)=123 -> 124, width=52
+        // Odd y (59.7), fractional height (21.1): y1=58, y2=ceil(80.8)=81 -> 82, height=24
+        let unaligned = rect(73.0, 59.7, 49.3, 21.1);
+        let aligned = align_hardware_damage(unaligned, screen).expect("aligned rect exists");
+
+        assert_eq!(aligned.x, 72.0);
+        assert_eq!(aligned.y, 58.0);
+        assert_eq!(aligned.width, 52.0);
+        assert_eq!(aligned.height, 24.0);
+        assert_eq!(aligned.x % 2.0, 0.0);
+        assert_eq!(aligned.y % 2.0, 0.0);
+        assert_eq!((aligned.x + aligned.width) % 2.0, 0.0);
+        assert_eq!((aligned.y + aligned.height) % 2.0, 0.0);
     }
 }
