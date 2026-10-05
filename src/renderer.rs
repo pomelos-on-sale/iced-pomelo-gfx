@@ -142,6 +142,27 @@ impl Renderer {
         self.transformations
     }
 
+    /// Blits a baked 16-bit RGB565 bitmap image with an 8-bit alpha mask into the current layer.
+    pub fn draw_bitmap_565(
+        &mut self,
+        bounds: Rectangle,
+        width: u16,
+        height: u16,
+        rgb565: &'static [u16],
+        alpha: &'static [u8],
+    ) {
+        let (layer, transformation) = self.layers.current_mut();
+        let placement = Placement::of(transformation);
+        let mapped = placement.map(bounds);
+        layer.quads.push(Primitive::Image565 {
+            rect: GfxRect::from_ltwh(mapped.x, mapped.y, mapped.width, mapped.height),
+            pixels: rgb565,
+            alpha: Some(alpha),
+            src_w: width as u32,
+            src_h: height as u32,
+        });
+    }
+
     /// Draws the recording into `canvas`, clipped to `damage`.
     ///
     /// The layer's bounds are the clip for the commands that have none of their own, and a canvas's

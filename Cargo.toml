@@ -14,23 +14,10 @@ profile = []
 default = []
 
 [dependencies]
-# This crate is its own repository, and `pomelo-gfx` is its sibling repository rather than a
-# directory: a path dependency would only resolve where the two happen to lie next to each other,
-# which is true inside `pomelo-os` and nowhere else. `pomelo-os` patches this git source back to
-# its `vendor/pomelo-gfx` submodule, so the two are the same checkout there.
-pomelo-gfx = { git = "ssh://git@github.com/pomelos-on-sale/pomelo-gfx.git" }
+pomelo-gfx = { path = "../pomelo-gfx" }
 
-iced_core = "0.14"
-# iced's compositor contract is implemented here, and it is stated in terms of window handles:
-# `Display` and `Window` are supertraits of `HasDisplayHandle`/`HasWindowHandle`. The version has
-# to be the one `iced_graphics` uses, because those are blanket impls -- a second copy of the
-# crate would be a different trait and nothing would line up.
+iced_core = { path = "../iced/core" }
 raw-window-handle = "0.6"
-# iced's canvas geometry: the two types a *renderer* defines so that a `canvas` has something to
-# record into (`Geometry`, and the `Frame` it is built from). It is not optional yet -- see the
-# crate docs.
-iced_graphics = { version = "0.14", features = ["geometry"] }
-# iced's canvas states its paths as `lyon_path` paths -- `iced_graphics::geometry::Path` wraps one,
-# and `Path::raw()` is the only way to read the verbs back out. `iced_graphics`' own `geometry`
-# feature turns its copy on; this crate names the crate directly, so it needs its own edge.
+iced_graphics = { path = "../iced/graphics", features = ["geometry"] }
 lyon_path = "1.0"
+

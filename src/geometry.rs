@@ -109,6 +109,19 @@ pub enum Primitive {
         /// How wide, and with what ends and joins.
         stroke: GfxStroke,
     },
+    /// A 16-bit RGB565 bitmap image with optional 8-bit alpha mask.
+    Image565 {
+        /// The destination rectangle.
+        rect: Rect,
+        /// The RGB565 pixels.
+        pixels: &'static [u16],
+        /// The optional alpha mask.
+        alpha: Option<&'static [u8]>,
+        /// Source width in pixels.
+        src_w: u32,
+        /// Source height in pixels.
+        src_h: u32,
+    },
 }
 
 impl Parameters {
@@ -191,6 +204,7 @@ impl Primitive {
             Primitive::Rounded { rrect, .. } => rect_bounds(rrect.rect),
             Primitive::RoundedStroke { rrect, .. } => rect_bounds(rrect.rect),
             Primitive::Stroke { path, stroke, .. } => points_bounds(path).expand(stroke.width),
+            Primitive::Image565 { rect, .. } => rect_bounds(*rect),
         }
     }
 }
@@ -596,6 +610,29 @@ pub fn draw(
             paint,
             stroke,
         } => canvas.stroke_path(path, paint, stroke),
+        Primitive::Image565 {
+            rect,
+            pixels,
+            alpha,
+            src_w,
+            src_h,
+        } => {
+            let tx = rect.left().round() as i32;
+            let ty = rect.top().round() as i32;
+            let w = rect.width.round() as u32;
+            let h = rect.height.round() as u32;
+            if let Some(alpha) = alpha {
+                if *src_w == w && *src_h == h {
+                    canvas.blit_image_565_with_alpha(tx, ty, w, h, pixels, alpha);
+                } else {
+                    canvas.blit_image_565_with_alpha_scaled(
+                        tx, ty, w, h, *src_w, *src_h, pixels, alpha,
+                    );
+                }
+            } else {
+                canvas.blit_image_565(tx, ty, w, h, pixels);
+            }
+        }
     }
 
     canvas.restore();

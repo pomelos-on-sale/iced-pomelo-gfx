@@ -278,9 +278,7 @@ dependencies = [
 
 [[package]]
 name = "iced_core"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91ab1937d699403e7e69252ae743a902bcee9f4ab2052cc4c9a46fcf34729d85"
+version = "0.14.1"
 dependencies = [
  "bitflags",
  "bytes",
@@ -296,9 +294,7 @@ dependencies = [
 
 [[package]]
 name = "iced_futures"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8c0c85ccad42dfbec7293c36c018af0ea0dbcc52d137a4a9a0b0f6822a3fdf0a"
+version = "0.14.1"
 dependencies = [
  "futures",
  "iced_core",
@@ -310,9 +306,7 @@ dependencies = [
 
 [[package]]
 name = "iced_graphics"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "234ca1c2cec4155055f68fa5fad1b5242c496ac8238d80a259bca382fb44a102"
+version = "0.14.1"
 dependencies = [
  "bitflags",
  "bytemuck",
@@ -481,7 +475,6 @@ checksum = "13bee6c73da26345c729282832b60b0363cf3dd9f4bfd81d8551b7a1c889a113"
 [[package]]
 name = "pomelo-gfx"
 version = "0.1.0"
-source = "git+ssh://git@github.com/pomelos-on-sale/pomelo-gfx.git#0bea1ec1b4f606c24b35cbdd761d3935a4f4a07c"
 dependencies = [
  "kurbo",
 ]
