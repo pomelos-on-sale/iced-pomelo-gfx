@@ -70,8 +70,6 @@ fn a_gradient_rectangle_arrives_as_a_gradient() {
 }
 
 #[test]
-#[ignore = "pomelo-gfx has no path filling: `Canvas::fill_path` strokes the outline with a \
-            1 px line and ignores the fill rule"]
 fn a_filled_path_is_filled() {
     let mut frame = frame();
 
