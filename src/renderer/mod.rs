@@ -479,7 +479,8 @@ impl text::Renderer for Renderer {
         clip_bounds: Rectangle,
     ) {
         let _ = (editor, position, color, clip_bounds);
-        todo!("record the editor's glyphs")
+        // Fallback: editor glyph rendering is pending custom editor replay.
+        // Safely no-op instead of aborting via panic when an editor widget is rendered.
     }
 
     /// Records a run of text. iced hands this the raw text and its geometry, so it is shaped when

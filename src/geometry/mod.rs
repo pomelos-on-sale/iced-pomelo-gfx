@@ -262,14 +262,16 @@ impl Backend for Frame {
         self.stroke(&Path::rectangle(top_left, size), stroke);
     }
 
-    /// Not recorded yet: see the module docs. A `canvas` that draws its own text will hit this.
+    /// Canvas text rasterization placeholder (avoids aborting firmware).
     fn fill_text(&mut self, _text: impl Into<Text>) {
-        todo!("canvas text: a Paragraph, and a blit_mask replay")
+        // Canvas text is not yet rasterized directly onto geometry frames.
+        // Safely no-op rather than aborting the runtime via panic.
     }
 
-    /// Not recorded yet: see the module docs.
+    /// Canvas stroked text rasterization placeholder (avoids aborting firmware).
     fn stroke_text<'a>(&mut self, _text: impl Into<Text>, _stroke: impl Into<Stroke<'a>>) {
-        todo!("canvas stroked text: same as fill_text, with an outline to fill")
+        // Canvas stroked text is not yet rasterized directly onto geometry frames.
+        // Safely no-op rather than aborting the runtime via panic.
     }
 
     /// A frame for a group drawn into `clip_bounds`.
