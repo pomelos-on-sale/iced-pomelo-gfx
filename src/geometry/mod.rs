@@ -455,6 +455,11 @@ pub fn draw(
                 canvas.blit_image_565(tx, ty, w, h, pixels);
             }
         }
+        Primitive::Qoi { rect, data } => {
+            let tx = rect.left().round() as i32;
+            let ty = rect.top().round() as i32;
+            let _ = canvas.blit_qoi(tx, ty, data);
+        }
     }
 
     canvas.restore();

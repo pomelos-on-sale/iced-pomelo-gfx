@@ -163,6 +163,17 @@ impl Renderer {
         });
     }
 
+    /// Blits a QOI compressed image into the current layer.
+    pub fn draw_qoi(&mut self, bounds: Rectangle, qoi_bytes: &'static [u8]) {
+        let (layer, transformation) = self.layers.current_mut();
+        let placement = Placement::of(transformation);
+        let mapped = placement.map(bounds);
+        layer.quads.push(Primitive::Qoi {
+            rect: GfxRect::from_ltwh(mapped.x, mapped.y, mapped.width, mapped.height),
+            data: qoi_bytes,
+        });
+    }
+
     /// Draws the recording into `canvas`, clipped to `damage`.
     ///
     /// The layer's bounds are the clip for the commands that have none of their own, and a canvas's

@@ -72,6 +72,13 @@ pub enum Primitive {
         /// Source height in pixels.
         src_h: u32,
     },
+    /// A QOI compressed image blitted natively into RGB565.
+    Qoi {
+        /// Target bounds in device space.
+        rect: Rect,
+        /// The raw QOI file bytes in static flash/memory.
+        data: &'static [u8],
+    },
 }
 
 impl Primitive {
@@ -89,6 +96,7 @@ impl Primitive {
             Primitive::RoundedStroke { rrect, .. } => rect_bounds(rrect.rect),
             Primitive::Stroke { path, stroke, .. } => points_bounds(path).expand(stroke.width),
             Primitive::Image565 { rect, .. } => rect_bounds(*rect),
+            Primitive::Qoi { rect, .. } => rect_bounds(*rect),
         }
     }
 }
