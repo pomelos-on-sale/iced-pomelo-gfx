@@ -163,6 +163,26 @@ impl Renderer {
         });
     }
 
+    /// Blits an opaque 16-bit RGB565 bitmap image into the current layer without alpha blending.
+    pub fn draw_image_565_opaque(
+        &mut self,
+        bounds: Rectangle,
+        width: u16,
+        height: u16,
+        rgb565: &'static [u16],
+    ) {
+        let (layer, transformation) = self.layers.current_mut();
+        let placement = Placement::of(transformation);
+        let mapped = placement.map(bounds);
+        layer.quads.push(Primitive::Image565 {
+            rect: GfxRect::from_ltwh(mapped.x, mapped.y, mapped.width, mapped.height),
+            pixels: rgb565,
+            alpha: None,
+            src_w: width as u32,
+            src_h: height as u32,
+        });
+    }
+
     /// Blits a QOI compressed image into the current layer.
     pub fn draw_qoi(&mut self, bounds: Rectangle, qoi_bytes: &'static [u8]) {
         let (layer, transformation) = self.layers.current_mut();

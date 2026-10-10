@@ -452,7 +452,7 @@ pub fn draw(
                     );
                 }
             } else {
-                canvas.blit_image_565(tx, ty, w, h, pixels);
+                canvas.blit_image_565(tx, ty, *src_w, *src_h, pixels);
             }
         }
         Primitive::Qoi { rect, data } => {
